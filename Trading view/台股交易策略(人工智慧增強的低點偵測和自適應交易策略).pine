@@ -1,0 +1,308 @@
+//@version=5
+strategy("AI-Enhanced Low Point Detection and Adaptive Trading Strategy", overlay=true, max_labels_count=500, initial_capital=1000000, default_qty_type=strategy.cash, default_qty_value=10000, calc_on_every_tick=true)
+
+
+// 顏色設置
+color bullColor = color.new(#00E676, 0)
+color bearColor = color.new(#FF3D00, 0)
+color neutralColor = color.new(#64B5F6, 0)
+color textColor = color.new(color.white, 0)
+color bgColor = color.new(color.black, 80)
+
+
+// 高級參數設置
+yearLookback = 252
+shortLookback = input.int(20, "短期回顧期間", minval=5, maxval=50)
+rsiLength = input.int(14, "RSI週期", minval=1)
+rsiOversold = input.int(40, "RSI相對超賣閾值", minval=30, maxval=50)
+rsiOverbought = input.int(70, "RSI相對超買閾值", minval=50, maxval=90)
+bbDeviation = input.float(2.0, "布林帶標準差", minval=0.1, maxval=5)
+volumeThreshold = input.float(1.5, "成交量閾值", minval=1, maxval=3)
+bearishMAPeriod = input.int(200, "空頭判斷MA週期", minval=50, maxval=500)
+bearishThreshold = input.float(0.05, "空頭判斷閾值", minval=0.01, maxval=0.1, step=0.01)
+macdFastLength = input.int(12, "MACD快線長度", minval=1)
+macdSlowLength = input.int(26, "MACD慢線長度", minval=1)
+macdSignalLength = input.int(9, "MACD信號線長度", minval=1)
+learningRate = input.float(0.01, "AI學習率", minval=0.001, maxval=100, step=0.001)
+
+
+// 計算指標
+yearLow = ta.lowest(low, yearLookback)
+yearHigh = ta.highest(high, yearLookback)
+shortTermLow = ta.lowest(low, shortLookback)
+rsi = ta.rsi(close, rsiLength)
+[bbMiddle, bbUpper, bbLower] = ta.bb(close, shortLookback, bbDeviation)
+averageVolume = ta.sma(volume, 20)
+longMA = ta.sma(close, bearishMAPeriod)
+
+
+// 高級市場狀態判斷
+isRelativeLow = low <= shortTermLow[1] and close > shortTermLow[1]
+isPotentialLow = low <= ta.lowest(low, yearLookback / 4) and close > ta.lowest(low, yearLookback / 4)[1]
+isRelativeHigh = high >= ta.highest(high[1], shortLookback) and close < high
+isPotentialHigh = high >= ta.highest(high, yearLookback / 4) and close < high
+nearLowerBB = close < bbLower + (bbMiddle - bbLower) * 0.3
+volumeBreakout = volume > averageVolume * volumeThreshold
+isBearish = close < longMA and (longMA - close) / close > bearishThreshold
+isBullish = close > longMA and (close - longMA) / longMA > bearishThreshold
+
+
+// MACD計算與判斷
+[macdLine, signalLine, histLine] = ta.macd(close, macdFastLength, macdSlowLength, macdSignalLength)
+macdReverse = histLine > histLine[1] and histLine[1] <= histLine[2]
+
+
+// 價格動量與波動性分析
+priceChangeRate = ta.change(close) / close[1] * 100
+volumeChangeRate = ta.change(volume) / volume[1] * 100
+strongReboundSignal = priceChangeRate > 3 and volumeChangeRate > 50
+
+
+// 市場週期與趨勢分析
+var int consecutiveDownDays = 0
+if close < close[1]
+    consecutiveDownDays := consecutiveDownDays + 1
+else
+    consecutiveDownDays := 0
+
+
+yearHighPrice = ta.highest(high, 252)
+dropFromYearHigh = (yearHighPrice - close) / yearHighPrice * 100
+
+
+// 自適應神經網絡
+var float[] weights = array.new_float(8, 0.5)  // 擴展權重數量
+var float bias = 0.0
+
+
+neuralNetworkOutput(rsi, bbPercent, volumeRatio, macdHist, consDays, yearDrop, priceChange, volChange) =>
+    float sum = 0.0
+    sum += rsi * weights.get(0)
+    sum += bbPercent * weights.get(1)
+    sum += volumeRatio * weights.get(2)
+    sum += macdHist * weights.get(3)
+    sum += consDays * weights.get(4)
+    sum += yearDrop * weights.get(5)
+    sum += priceChange * weights.get(6)
+    sum += volChange * weights.get(7)
+    sum += bias
+    1 / (1 + math.exp(-sum))  // Sigmoid激活函數
+
+
+// 計算神經網絡輸入
+bbPercent = (close - bbLower) / (bbUpper - bbLower)
+volumeRatio = volume / averageVolume
+macdHistNormalized = histLine / close * 100
+
+
+// 獲取神經網絡輸出
+nnOutput = neuralNetworkOutput(rsi / 100, bbPercent, volumeRatio, macdHistNormalized, 
+                               math.min(consecutiveDownDays, 10) / 10, 
+                               math.min(dropFromYearHigh, 50) / 50,
+                               math.min(math.abs(priceChangeRate), 10) / 10,
+                               math.min(volumeChangeRate, 100) / 100)
+
+
+// 自適應學習過程
+var float prevClose = na
+var float prevOutput = na
+if not na(prevClose) and not na(prevOutput)
+    realOutput = close > prevClose ? 1.0 : 0.0
+    error = realOutput - prevOutput
+    // 更新權重和偏置
+    for i = 0 to 7
+        weights.set(i, weights.get(i) + learningRate * error * weights.get(i))
+    bias := bias + learningRate * error
+
+
+prevClose := close
+prevOutput := nnOutput
+
+
+// 智能買入信號
+buySignal = nnOutput > 0.8 and (isRelativeLow or isPotentialLow) and nearLowerBB and rsi < rsiOversold and volumeBreakout
+
+
+// AI賣出信號
+aiSellSignal = nnOutput < 0.2 and (isRelativeHigh or isPotentialHigh) and close > bbUpper - (bbUpper - bbMiddle) * 0.3 and rsi > rsiOverbought and volumeBreakout
+
+
+// 交易邏輯
+if isRelativeLow
+    strategy.order("相對低點買入", strategy.long, qty=1000)
+    label.new(bar_index, low, "相對低點\n買入1000股", color=bullColor, textcolor=color.white, style=label.style_label_up, size=size.small)
+
+
+if isPotentialLow
+    strategy.order("潛在低點買入", strategy.long, qty=2000)
+    label.new(bar_index, low, "潛在低點\n買入2000股", color=bullColor, textcolor=color.white, style=label.style_label_up, size=size.small)
+
+
+if buySignal
+    strategy.order("AI買點買入", strategy.long, qty=5000)
+    label.new(bar_index, low, "AI買點\n買入5000股", color=bullColor, textcolor=color.white, style=label.style_label_up, size=size.small)
+
+
+// 賣出邏輯
+if isPotentialHigh and strategy.position_size > 0
+    sellShares = math.min(500, strategy.position_size)
+    strategy.order("潛在高點賣出", strategy.short, qty=sellShares)
+    label.new(bar_index, high, "潛在高點\n賣出" + str.tostring(sellShares) + "股", color=bearColor, textcolor=color.white, style=label.style_label_down, size=size.small)
+
+
+if aiSellSignal and strategy.position_size > 0
+    sellShares = math.min(1000, strategy.position_size)
+    strategy.order("AI賣點賣出", strategy.short, qty=sellShares)
+    label.new(bar_index, high, "AI賣點\n賣出" + str.tostring(sellShares) + "股", color=bearColor, textcolor=color.white, style=label.style_label_down, size=size.small)
+
+
+// 繪圖與標記
+plot(bbMiddle, color=color.new(color.yellow, 50), linewidth=1, title="布林中軌")
+plot(bbUpper, color=color.new(color.yellow, 50), linewidth=1, title="布林上軌")
+plot(bbLower, color=color.new(color.yellow, 50), linewidth=1, title="布林下軌")
+plot(longMA, color=color.new(color.purple, 0), linewidth=2, title="長期MA")
+
+
+plotshape(isRelativeLow and not isPotentialLow, style=shape.circle, location=location.belowbar, color=color.new(bullColor, 50), size=size.small, title="相對低點")
+plotshape(isPotentialLow, style=shape.diamond, location=location.belowbar, color=bullColor, size=size.small, title="潛在低點")
+plotshape(buySignal, style=shape.triangleup, location=location.belowbar, color=bullColor, size=size.small, title="AI買入信號")
+plotshape(isRelativeHigh and not isPotentialHigh, style=shape.circle, location=location.abovebar, color=color.new(bearColor, 50), size=size.small, title="相對高點")
+plotshape(isPotentialHigh, style=shape.diamond, location=location.abovebar, color=bearColor, size=size.small, title="潛在高點")
+plotshape(aiSellSignal, style=shape.triangledown, location=location.abovebar, color=bearColor, size=size.small, title="AI賣出信號")
+
+
+// 高級信息顯示
+var table infoTable = table.new(position.top_right, 5, 16, bgcolor=bgColor, border_width=1)
+if barstate.isrealtime or barstate.islast
+    table.cell(infoTable, 0, 0, "AI指標", text_color=textColor, bgcolor=bgColor)
+    table.cell(infoTable, 1, 0, "數值", text_color=textColor, bgcolor=bgColor)
+    table.cell(infoTable, 2, 0, "狀態", text_color=textColor, bgcolor=bgColor)
+    
+    table.cell(infoTable, 0, 1, "神經網絡輸出", text_color=textColor, bgcolor=bgColor)
+    table.cell(infoTable, 1, 1, str.tostring(nnOutput, "#.###"), text_color=nnOutput > 0.7 ? bullColor : nnOutput < 0.3 ? bearColor : neutralColor, bgcolor=bgColor)
+    table.cell(infoTable, 2, 1, nnOutput > 0.7 ? "強烈買入信號" : nnOutput < 0.3 ? "可能不適合買入" : "中性", text_color=nnOutput > 0.7 ? bullColor : nnOutput < 0.3 ? bearColor : neutralColor, bgcolor=bgColor)
+    
+    table.cell(infoTable, 0, 2, "RSI", text_color=textColor, bgcolor=bgColor)
+    table.cell(infoTable, 1, 2, str.tostring(rsi, "#.##"), text_color=rsi < rsiOversold ? bullColor : rsi > rsiOverbought ? bearColor : neutralColor, bgcolor=bgColor)
+    table.cell(infoTable, 2, 2, rsi < rsiOversold ? "超賣" : rsi > rsiOverbought ? "超買" : "正常", text_color=rsi < rsiOversold ? bullColor : rsi > rsiOverbought ? bearColor : neutralColor, bgcolor=bgColor)
+    
+    table.cell(infoTable, 0, 3, "布林帶位置", text_color=textColor, bgcolor=bgColor)
+    table.cell(infoTable, 1, 3, str.tostring(bbPercent * 100, "#.##") + "%", text_color=nearLowerBB ? bullColor : bearColor, bgcolor=bgColor)
+    table.cell(infoTable, 2, 3, nearLowerBB ? "接近下軌" : "正常", text_color=nearLowerBB ? bullColor : neutralColor, bgcolor=bgColor)
+    
+    table.cell(infoTable, 0, 4, "成交量異常", text_color=textColor, bgcolor=bgColor)
+    table.cell(infoTable, 1, 4, str.tostring(volumeRatio, "#.##") + "x", text_color=volumeBreakout ? bullColor : bearColor, bgcolor=bgColor)
+    table.cell(infoTable, 2, 4, volumeBreakout ? "放量" : "正常", text_color=volumeBreakout ? bullColor : neutralColor, bgcolor=bgColor)
+    
+    table.cell(infoTable, 0, 5, "市場趨勢", text_color=textColor, bgcolor=bgColor)
+    table.cell(infoTable, 1, 5, isBearish ? "空頭" : isBullish ? "多頭" : "盤整", text_color=isBearish ? bearColor : isBullish ? bullColor : neutralColor, bgcolor=bgColor)
+    table.cell(infoTable, 2, 5, isBearish ? "警惕" : isBullish ? "樂觀" : "中性", text_color=isBearish ? bearColor : isBullish ? bullColor : neutralColor, bgcolor=bgColor)
+    
+    table.cell(infoTable, 0, 6, "MACD反轉", text_color=textColor, bgcolor=bgColor)
+    table.cell(infoTable, 1, 6, macdReverse ? "是" : "否", text_color=macdReverse ? bullColor : bearColor, bgcolor=bgColor)
+    table.cell(infoTable, 2, 6, macdReverse ? "看漲信號" : "-", text_color=macdReverse ? bullColor : neutralColor, bgcolor=bgColor)
+    
+    table.cell(infoTable, 0, 7, "連續下跌", text_color=textColor, bgcolor=bgColor)
+    table.cell(infoTable, 1, 7, str.tostring(consecutiveDownDays), text_color=consecutiveDownDays > 5 ? bullColor : neutralColor, bgcolor=bgColor)
+    table.cell(infoTable, 2, 7, consecutiveDownDays > 5 ? "超跌" : "正常", text_color=consecutiveDownDays > 5 ? bullColor : neutralColor, bgcolor=bgColor)
+    
+    table.cell(infoTable, 0, 8, "52周跌幅", text_color=textColor, bgcolor=bgColor)
+    table.cell(infoTable, 1, 8, str.tostring(dropFromYearHigh, "#.##") + "%", text_color=dropFromYearHigh > 30 ? bullColor : neutralColor, bgcolor=bgColor)
+    table.cell(infoTable, 2, 8, dropFromYearHigh > 30 ? "大幅回調" : "正常", text_color=dropFromYearHigh > 30 ? bullColor : neutralColor, bgcolor=bgColor)
+    
+    table.cell(infoTable, 0, 9, "當前倉位", text_color=textColor, bgcolor=bgColor)
+    table.cell(infoTable, 1, 9, str.tostring(strategy.position_size), text_color=strategy.position_size > 0 ? bullColor : bearColor, bgcolor=bgColor)
+    table.cell(infoTable, 2, 9, strategy.position_size > 0 ? "持有中" : "等待機會", text_color=strategy.position_size > 0 ? bullColor : neutralColor, bgcolor=bgColor)
+    
+    // 使用 TradingView 內置函數計算盈虧
+    float unrealizedProfit = (strategy.position_size * (close - strategy.position_avg_price))
+    float totalProfit = strategy.netprofit
+    float profitPercentage = strategy.netprofit / strategy.initial_capital * 100
+
+
+    table.cell(infoTable, 0, 10, "當前市值", text_color=textColor, bgcolor=bgColor)
+    table.cell(infoTable, 1, 10, str.tostring(strategy.position_size * close, "#.##"), text_color=textColor, bgcolor=bgColor)
+    table.cell(infoTable, 2, 10, "持倉價值", text_color=textColor, bgcolor=bgColor)
+    
+    table.cell(infoTable, 0, 11, "總盈虧", text_color=textColor, bgcolor=bgColor)
+    table.cell(infoTable, 1, 11, str.tostring(totalProfit, "#.##"), text_color=totalProfit > 0 ? bullColor : bearColor, bgcolor=bgColor)
+    table.cell(infoTable, 2, 11, str.tostring(profitPercentage, "#.##") + "%", text_color=totalProfit > 0 ? bullColor : bearColor, bgcolor=bgColor)
+    
+    table.cell(infoTable, 0, 12, "未實現盈虧", text_color=textColor, bgcolor=bgColor)
+    table.cell(infoTable, 1, 12, str.tostring(unrealizedProfit, "#.##"), text_color=unrealizedProfit > 0 ? bullColor : bearColor, bgcolor=bgColor)
+    table.cell(infoTable, 2, 12, "持倉盈虧", text_color=textColor, bgcolor=bgColor)
+// 優化AI風險評估
+riskLevel = 0.0
+riskLevel += isBearish ? 0.3 : 0
+riskLevel += consecutiveDownDays > 5 ? 0.2 : 0
+riskLevel += dropFromYearHigh > 30 ? 0.2 : 0
+riskLevel += volumeRatio > 2 ? 0.2 : 0
+riskLevel += math.abs(ta.change(close)) / close * 100 > 3 ? 0.1 : 0
+riskLevel += rsi > 70 ? 0.1 : rsi < 30 ? 0.2 : 0
+riskLevel += nnOutput < 0.3 ? 0.2 : 0
+
+
+riskStatus = riskLevel > 0.7 ? "高風險" : riskLevel > 0.4 ? "中等風險" : "低風險"
+riskColor = riskLevel > 0.7 ? color.red : riskLevel > 0.4 ? color.yellow : color.green
+
+
+if barstate.isrealtime or barstate.islast
+    table.cell(infoTable, 0, 14, "AI風險評估", text_color=textColor, bgcolor=bgColor)
+    table.cell(infoTable, 1, 14, str.tostring(riskLevel, "#.##"), text_color=riskColor, bgcolor=bgColor)
+    table.cell(infoTable, 2, 14, riskStatus, text_color=riskColor, bgcolor=bgColor)
+
+
+// 智能交易提示
+if (barstate.isrealtime or barstate.islast) and buySignal
+    label.new(bar_index, low, "AI買入信號", color=bullColor, textcolor=color.white, style=label.style_label_up, size=size.small)
+    alert("AI檢測到強烈買入機會，建議評估風險後入場", alert.freq_once_per_bar_close)
+
+
+// 市場異常波動警告
+if (barstate.isrealtime or barstate.islast) and ta.cum(volume) > ta.sma(ta.cum(volume), 20) * 2 and math.abs(ta.change(close)) / close * 100 > 5
+    label.new(bar_index, high, "市場異常波動", color=color.new(color.yellow, 0), textcolor=color.black, style=label.style_label_down, size=size.small)
+    alert("檢測到市場異常波動，請謹慎交易", alert.freq_once_per_bar_close)
+
+
+// 市場洞察力報告
+insightText = ""
+insightText += nnOutput > 0.8 ? "AI檢測到強烈買入信號\n" : ""
+insightText += isBearish ? "當前處於空頭市場，需謹慎\n" : ""
+insightText += dropFromYearHigh > 30 ? "股價已從高點大幅回落，可能存在反彈機會\n" : ""
+insightText += consecutiveDownDays > 5 ? "連續下跌多日，可能存在超賣機會\n" : ""
+insightText += volumeBreakout ? "成交量突破，關注價格變化\n" : ""
+insightText += macdReverse ? "MACD顯示潛在反轉信號\n" : ""
+
+
+// 高級市場周期分析
+marketCycle = ta.ema(close, 200) > ta.ema(close, 50) ? "牛市" : "熊市"
+cycleStrength = math.abs(ta.ema(close, 200) - ta.ema(close, 50)) / ta.ema(close, 200) * 100
+
+
+// AI預測未來趨勢
+futureTrend = nnOutput > 0.7 ? "上漲" : nnOutput < 0.3 ? "下跌" : "橫盤"
+futureTrendConfidence = math.abs(nnOutput - 0.5) * 200  // 轉換為百分比
+
+
+if barstate.isrealtime or barstate.islast
+    // 市場洞察
+    if insightText != ""
+        label.new(bar_index, low, "市場洞察:\n" + insightText, 
+                  color=color.new(color.blue, 0), 
+                  textcolor=color.white, 
+                  style=label.style_label_up, 
+                  size=size.small)
+    
+    // 市場周期
+    label.new(bar_index, high, "市場周期: " + marketCycle + "\n周期強度: " + str.tostring(cycleStrength, "#.##") + "%", 
+              color=color.new(color.purple, 0), 
+              textcolor=color.white, 
+              style=label.style_label_down, 
+              size=size.small)
+    
+    // AI預測趨勢
+    label.new(bar_index + 5, (high + low) / 2, "AI預測趨勢: " + futureTrend + "\n置信度: " + str.tostring(futureTrendConfidence, "#.##") + "%", 
+              color=color.new(color.blue, 0), 
+              textcolor=color.white, 
+              style=label.style_label_right, 
+              size=size.small)
